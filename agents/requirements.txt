@@ -1,4 +1,7 @@
 agent-framework-azure-ai
 agent-framework-devui
+agent-framework-mem0
 python-dotenv
 azure-identity
+mem0ai
+azure-search-documents==11.5.2

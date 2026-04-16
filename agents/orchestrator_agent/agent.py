@@ -11,8 +11,11 @@ import time
 from pathlib import Path
 
 from azure.identity import DefaultAzureCredential
-from agent_framework.azure import AzureOpenAIResponsesClient
+from agent_framework.openai import OpenAIChatClient
+from agent_framework.mem0 import Mem0ContextProvider
 from dotenv import load_dotenv
+from mem0 import AsyncMemory
+from mem0.configs.base import MemoryConfig
 
 # Load shared .env from agents/ directory, then any local .env
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
@@ -60,10 +63,10 @@ def refresh_fabric_headers() -> None:
 # ---------------------------------------------------------------------------
 # Azure OpenAI client (API key auth)
 # ---------------------------------------------------------------------------
-client = AzureOpenAIResponsesClient(
-    endpoint=os.environ["AOAI_ENDPOINT"],
+client = OpenAIChatClient(
+    model=os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"],
+    base_url=os.environ["AOAI_ENDPOINT"],
     api_key=os.environ["AOAI_KEY"],
-    deployment_name=os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"],
 )
 
 # ---------------------------------------------------------------------------
@@ -91,6 +94,62 @@ product_tool = client.get_mcp_tool(
 )
 
 # ---------------------------------------------------------------------------
+# Mem0 memory store — backed by Azure AI Search
+# ---------------------------------------------------------------------------
+# Mem0's AzureConfig expects the bare Azure endpoint (no /openai/v1/ suffix)
+_aoai_base = os.environ["AOAI_ENDPOINT"].rstrip("/").removesuffix("/openai/v1").removesuffix("/openai")
+
+mem0_config = {
+    "vector_store": {
+        "provider": "azure_ai_search",
+        "config": {
+            "service_name": os.environ["AZURE_AI_SEARCH_SERVICE_NAME"],
+            "api_key": os.environ.get("AZURE_AI_SEARCH_API_KEY", ""),
+            "collection_name": os.environ.get(
+                "AZURE_AI_SEARCH_INDEX_NAME", "mem0-orchestrator-memories"
+            ),
+            "embedding_model_dims": 1536,  # text-embedding-3-small
+        },
+    },
+    "llm": {
+        "provider": "azure_openai",
+        "config": {
+            "model": os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"],
+            "azure_kwargs": {
+                "azure_deployment": os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"],
+                "azure_endpoint": _aoai_base,
+                "api_key": os.environ["AOAI_KEY"],
+                "api_version": "2025-04-01-preview",
+            },
+        },
+    },
+    "embedder": {
+        "provider": "azure_openai",
+        "config": {
+            "model": os.environ["AOAI_EMBEDDINGS_MODEL"],
+            "azure_kwargs": {
+                "azure_deployment": os.environ["AOAI_EMBEDDINGS_MODEL"],
+                "azure_endpoint": _aoai_base,
+                "api_key": os.environ["AOAI_KEY"],
+                "api_version": "2025-04-01-preview",
+            },
+        },
+    },
+}
+
+mem0_client = AsyncMemory(MemoryConfig(
+    vector_store=mem0_config["vector_store"],
+    llm=mem0_config["llm"],
+    embedder=mem0_config["embedder"],
+))
+
+mem0_provider = Mem0ContextProvider(
+    source_id="mem0",
+    user_id="devui-user",
+    mem0_client=mem0_client,
+)
+
+# ---------------------------------------------------------------------------
 # Agent
 # ---------------------------------------------------------------------------
 agent = client.as_agent(
@@ -98,8 +157,9 @@ agent = client.as_agent(
     description=(
         "Orchestrates three Fabric data agent MCP tools (Sales, Customer, Product) "
         "to answer business questions across orders, customers, addresses, products, "
-        "categories, and more."
+        "categories, and more. Remembers user preferences across sessions."
     ),
     instructions=_instructions,
     tools=[sales_tool, customer_tool, product_tool],
+    context_providers=[mem0_provider],
 )

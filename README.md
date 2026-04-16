@@ -2,6 +2,8 @@
 
 An orchestrator agent built with the **Microsoft Agent Framework (MAF)** that queries three Microsoft Fabric data agents — **Sales**, **Customer**, and **Product** — via hosted MCP endpoints. The Azure OpenAI Responses API executes MCP tools server-side, so no local MCP server is needed.
 
+The DevUI version includes **persistent cross-session memory** powered by [Mem0](https://mem0.ai/) OSS with **Azure AI Search** as the vector store. The agent remembers user preferences (e.g., preferred output format, frequently queried customers) across conversations.
+
 Two interfaces ship from the same codebase:
 
 | Interface | Folder | Purpose |
@@ -39,8 +41,19 @@ Both share the same system prompt (`prompts/orchestrator_agent.md`) and the same
 │    ├── get_mcp_tool("Sales Agent",    url, headers)                 │
 │    ├── get_mcp_tool("Customer Agent", url, headers)                 │
 │    ├── get_mcp_tool("Product Agent",  url, headers)                 │
-│    └── as_agent(tools=[...], instructions=prompt)                   │
-└────────────────────────────────┬────────────────────────────────────┘
+│    ├── as_agent(tools=[...], instructions=prompt)                   │
+│    └── context_providers=[Mem0ContextProvider]                      │
+└──────────┬─────────────────────┬────────────────────────────────────┘
+           │                     │
+           ▼                     │
+┌──────────────────────┐         │
+│  Mem0 OSS Memory     │         │
+│  (Azure AI Search)   │         │
+│  - User preferences  │         │
+│  - Cross-session     │         │
+└──────────────────────┘         │
+                                 │
+─────────────────────────────────┘
                                  │
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -67,6 +80,7 @@ Both share the same system prompt (`prompts/orchestrator_agent.md`) and the same
 | **Azure OpenAI resource** | Deployment supporting the Responses API (e.g., `gpt-4o`) |
 | **Microsoft Fabric workspace** | With three data agents (Sales, Customer, Product) created and MCP endpoints enabled |
 | **Entra ID permissions** | Your identity (or managed identity) must have access to the Fabric workspace |
+| **Azure AI Search** | Any tier (Free works for dev) — used as the mem0 vector store for agent memory |
 
 ---
 
@@ -98,9 +112,16 @@ AZURE_OPENAI_DEPLOYMENT_NAME=<your-deployment-name>
 # NOTE: Do NOT set AZURE_OPENAI_API_VERSION — the MAF SDK default ("preview")
 # is correct. Setting an explicit dated version causes 400 errors.
 
+AOAI_EMBEDDINGS_MODEL=<your-embedding-deployment-name>  # e.g. text-embedding-3-small
+
 FABRIC_SALES_AGENT_MCP_URL=https://api.fabric.microsoft.com/v1/mcp/workspaces/<workspace-id>/dataagents/<sales-agent-id>/agent
 FABRIC_CUSTOMER_AGENT_MCP_URL=https://api.fabric.microsoft.com/v1/mcp/workspaces/<workspace-id>/dataagents/<customer-agent-id>/agent
 FABRIC_PRODUCT_AGENT_MCP_URL=https://api.fabric.microsoft.com/v1/mcp/workspaces/<workspace-id>/dataagents/<product-agent-id>/agent
+
+# Mem0 + Azure AI Search (memory store)
+AZURE_AI_SEARCH_SERVICE_NAME=<your-search-service-name>
+AZURE_AI_SEARCH_API_KEY=<your-search-admin-key>  # or leave empty for DefaultAzureCredential
+AZURE_AI_SEARCH_INDEX_NAME=mem0-orchestrator-memories
 ```
 
 ### 4. Authenticate to Azure
@@ -142,9 +163,9 @@ agents/                              # DevUI version (local development)
 ├── requirements.txt                 # Python dependencies
 └── orchestrator_agent/
     ├── __init__.py
-    ├── agent.py                     # Agent definition + MCP tool wiring
+    ├── agent.py                     # Agent definition + MCP tools + Mem0 memory
     └── prompts/
-        └── orchestrator_agent.md    # Shared system prompt
+        └── orchestrator_agent.md    # Shared system prompt (incl. memory instructions)
 
 m365_agents_orchestrator/            # M365 Channels version (Teams, Outlook, Copilot)
 ├── .env                             # Local-only env vars (not committed)
@@ -218,9 +239,31 @@ agent = client.as_agent(
 
 Azure OpenAI's Responses API handles MCP tool execution server-side — the orchestrator sends the tool definitions and Fabric bearer token, and Azure OpenAI calls the MCP endpoints directly.
 
+### Persistent Memory (DevUI)
+
+The DevUI version integrates **Mem0 OSS** with **Azure AI Search** as the vector store to provide persistent cross-session memory:
+
+- **How it works:** The `Mem0ContextProvider` hooks into the Agent Framework's context provider lifecycle. Before each agent run, it queries mem0 for relevant memories and injects them into the system prompt. After each run, it extracts new facts from the conversation and stores them.
+- **Vector store:** Azure AI Search stores memory embeddings. The index (`mem0-orchestrator-memories`) is auto-created on first use.
+- **LLM + Embedder:** Both use your Azure OpenAI resource — the chat model for memory extraction and the embedding model for vector encoding.
+- **Scoping:** Memories are currently scoped to a fixed `user_id` (`devui-user`). For multi-user scenarios, this can be made dynamic per session.
+
+```python
+mem0_provider = Mem0ContextProvider(
+    source_id="mem0",
+    user_id="devui-user",
+    mem0_client=mem0_client,  # AsyncMemory backed by Azure AI Search
+)
+
+agent = client.as_agent(
+    ...
+    context_providers=[mem0_provider],
+)
+```
+
 ### Sessions
 
-- **DevUI** — each browser session is a separate conversation with its own history.
+- **DevUI** — each browser session is a separate conversation with its own history. Mem0 memories persist across sessions.
 - **M365** — conversation state is managed per Teams conversation via `MemoryStorage`. The M365 version also handles `signin/tokenExchange`, `signin/verifystate`, and `signin/failure` invoke activities for SSO flow.
 
 ---
@@ -248,9 +291,13 @@ See each agent's Fabric workspace page for endpoint details and schemas.
 
 | Package | Version | Notes |
 |---------|---------|-------|
-| `agent-framework-azure-ai` | `1.0.0b251007` | MAF Azure AI integration |
-| `agent-framework-core` | `1.0.0rc3` | MAF core runtime |
-| `openai` | `2.8.1` | Pinned — URL construction varies across versions |
+| `agent-framework-azure-ai` | `1.0.0rc6` | MAF Azure AI integration |
+| `agent-framework-core` | `1.0.1` | MAF core runtime |
+| `agent-framework-mem0` | `1.0.0b260409` | MAF Mem0 context provider |
+| `agent-framework-devui` | `1.0.0b260414` | MAF DevUI server |
+| `mem0ai` | `1.0.1` | Mem0 OSS memory layer |
+| `azure-search-documents` | `11.5.2` | Azure AI Search SDK (mem0 vector store) |
+| `openai` | `2.30.0` | Azure OpenAI SDK |
 | `microsoft-agents-hosting-aiohttp` | `0.8.0` | M365 Agents SDK |
 | `microsoft-agents-hosting-core` | `0.8.0` | M365 Agents SDK |
 | `microsoft-agents-authentication-msal` | `0.8.0` | M365 Agents SDK |
