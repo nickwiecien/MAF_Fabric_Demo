@@ -63,7 +63,7 @@ def refresh_fabric_headers() -> None:
 # Azure OpenAI client
 # ---------------------------------------------------------------------------
 client = AzureOpenAIResponsesClient(
-    endpoint=os.environ["AOAI_ENDPOINT"],
+    base_url=os.environ["AOAI_ENDPOINT"],
     api_key=os.environ["AOAI_KEY"],
     deployment_name=os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"],
 )

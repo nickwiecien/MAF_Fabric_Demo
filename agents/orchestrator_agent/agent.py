@@ -14,6 +14,8 @@ from azure.identity import DefaultAzureCredential
 from agent_framework.openai import OpenAIChatClient
 from agent_framework.mem0 import Mem0ContextProvider
 from dotenv import load_dotenv
+
+from .graphql_tools import ALL_GRAPHQL_TOOLS
 from mem0 import AsyncMemory
 from mem0.configs.base import MemoryConfig
 
@@ -160,6 +162,6 @@ agent = client.as_agent(
         "categories, and more. Remembers user preferences across sessions."
     ),
     instructions=_instructions,
-    tools=[sales_tool, customer_tool, product_tool],
+    tools=[sales_tool, customer_tool, product_tool] + ALL_GRAPHQL_TOOLS,
     context_providers=[mem0_provider],
 )

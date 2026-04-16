@@ -41,21 +41,22 @@ Both share the same system prompt (`prompts/orchestrator_agent.md`) and the same
 │    ├── get_mcp_tool("Sales Agent",    url, headers)                 │
 │    ├── get_mcp_tool("Customer Agent", url, headers)                 │
 │    ├── get_mcp_tool("Product Agent",  url, headers)                 │
+│    ├── @tool GraphQL tools (search, orders, analytics, …)           │
 │    ├── as_agent(tools=[...], instructions=prompt)                   │
 │    └── context_providers=[Mem0ContextProvider]                      │
-└──────────┬─────────────────────┬────────────────────────────────────┘
-           │                     │
-           ▼                     │
-┌──────────────────────┐         │
-│  Mem0 OSS Memory     │         │
-│  (Azure AI Search)   │         │
-│  - User preferences  │         │
-│  - Cross-session     │         │
-└──────────────────────┘         │
-                                 │
-─────────────────────────────────┘
-                                 │
-                                 ▼
+└──────────┬──────────────┬──────────────┬────────────────────────────┘
+           │              │              │
+           ▼              │              ▼
+┌──────────────────────┐  │  ┌─────────────────────────────┐
+│  Mem0 OSS Memory     │  │  │  Fabric GraphQL API         │
+│  (Azure AI Search)   │  │  │  (httpx — async, direct)    │
+│  - User preferences  │  │  │  Products, Customers,       │
+│  - Cross-session     │  │  │  Orders, Addresses,         │
+└──────────────────────┘  │  │  Analytics / Aggregations   │
+                          │  └─────────────────────────────┘
+──────────────────────────┘
+                          │
+                          ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                  Azure OpenAI Responses API                         │
 │           (hosted MCP tool execution — server-side)                 │
@@ -118,6 +119,8 @@ FABRIC_SALES_AGENT_MCP_URL=https://api.fabric.microsoft.com/v1/mcp/workspaces/<w
 FABRIC_CUSTOMER_AGENT_MCP_URL=https://api.fabric.microsoft.com/v1/mcp/workspaces/<workspace-id>/dataagents/<customer-agent-id>/agent
 FABRIC_PRODUCT_AGENT_MCP_URL=https://api.fabric.microsoft.com/v1/mcp/workspaces/<workspace-id>/dataagents/<product-agent-id>/agent
 
+FABRIC_GRAPHQL_API_URL=https://api.fabric.microsoft.com/v1/workspaces/<workspace-id>/graphqlapis/<graphql-api-id>/graphql
+
 # Mem0 + Azure AI Search (memory store)
 AZURE_AI_SEARCH_SERVICE_NAME=<your-search-service-name>
 AZURE_AI_SEARCH_API_KEY=<your-search-admin-key>  # or leave empty for DefaultAzureCredential
@@ -163,9 +166,10 @@ agents/                              # DevUI version (local development)
 ├── requirements.txt                 # Python dependencies
 └── orchestrator_agent/
     ├── __init__.py
-    ├── agent.py                     # Agent definition + MCP tools + Mem0 memory
+    ├── agent.py                     # Agent definition + MCP tools + GraphQL tools + Mem0 memory
+    ├── graphql_tools.py             # 6 purpose-driven GraphQL tools (httpx)
     └── prompts/
-        └── orchestrator_agent.md    # Shared system prompt (incl. memory instructions)
+        └── orchestrator_agent.md    # Shared system prompt (incl. routing & memory instructions)
 
 m365_agents_orchestrator/            # M365 Channels version (Teams, Outlook, Copilot)
 ├── .env                             # Local-only env vars (not committed)
@@ -285,6 +289,40 @@ See each agent's Fabric workspace page for endpoint details and schemas.
 
 ---
 
+## GraphQL API Integration
+
+In addition to the MCP data agents, the orchestrator includes **six purpose-driven GraphQL tools** that execute structured queries directly against a Fabric GraphQL API endpoint. These tools use [`httpx`](https://www.python-httpx.org/) for async HTTP calls and are authenticated with the same Fabric bearer token used by the MCP tools.
+
+### GraphQL Tools
+
+| Tool | Purpose | Example Query |
+|------|---------|---------------|
+| `search_products` | Filter the product catalog by color, price range, size, category, or product number | "Show me all red products under $50" |
+| `get_customer_info` | Look up customers by ID, email address, or company name | "Find customer with email containing @contoso" |
+| `get_customer_addresses` | Retrieve all addresses linked to a customer (joins CustomerAddress → Address) | "What are customer 123's addresses?" |
+| `get_sales_orders` | Query order headers with date range, customer, status, and total filters | "Orders for customer 29545 in 2024" |
+| `get_order_line_items` | Get detailed line items (products, qty, price, discount) for a specific order | "What's in order 71774?" |
+| `get_sales_analytics` | Run aggregations (sum, avg, count, min, max) grouped by any field | "Total revenue by ship method" |
+
+### Routing: When to Use GraphQL vs MCP
+
+The system prompt includes routing guidance so the agent selects the right tool type:
+
+| Use GraphQL Tools When | Use MCP Data Agents When |
+|------------------------|--------------------------|
+| User provides exact filters, IDs, or date ranges | Question is open-ended or exploratory |
+| Aggregations/analytics are needed (sum, avg, group-by) | Domain-specific reasoning or interpretation is needed |
+| Drilling into a specific order's line items | Unsure what data exists — let the agent explore |
+| Precise joins across entities (e.g., customer → addresses) | Complex questions benefiting from agent reasoning |
+
+The agent can also **combine both** — e.g., use GraphQL for structured data retrieval and MCP for contextual interpretation in the same turn.
+
+### Schema Notes
+
+The GraphQL API exposes **flat entities** (no nested relationships). Cross-entity queries require multiple sequential calls — for example, `get_customer_addresses` chains `customerAddresses` → `addresses` in two hops. The schema supports filtering (`eq`, `gt`, `contains`, `in`, etc.), pagination (`first`, `after`), ordering, and `groupBy` aggregations (`sum`, `avg`, `min`, `max`, `count`).
+
+---
+
 ## SDK Versions
 
 > **Important:** The `openai` SDK version matters — different versions construct Azure OpenAI URLs differently, which can cause silent failures or 4xx errors.
@@ -297,6 +335,7 @@ See each agent's Fabric workspace page for endpoint details and schemas.
 | `agent-framework-devui` | `1.0.0b260414` | MAF DevUI server |
 | `mem0ai` | `1.0.1` | Mem0 OSS memory layer |
 | `azure-search-documents` | `11.5.2` | Azure AI Search SDK (mem0 vector store) |
+| `httpx` | `≥0.27` | Async HTTP client for GraphQL API calls |
 | `openai` | `2.30.0` | Azure OpenAI SDK |
 | `microsoft-agents-hosting-aiohttp` | `0.8.0` | M365 Agents SDK |
 | `microsoft-agents-hosting-core` | `0.8.0` | M365 Agents SDK |
