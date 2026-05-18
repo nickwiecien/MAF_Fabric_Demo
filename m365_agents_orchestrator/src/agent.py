@@ -538,7 +538,13 @@ async def _run_agent_pipeline(
     user_text: str,
     conversation_id: str,
 ) -> None:
-    """Acquire token → build MAF MCP tools → run agent → send response."""
+    """Acquire token → build MAF MCP tools → run agent → send response.
+
+    Uses the M365 Agents SDK ``StreamingResponse`` to stream incremental
+    chunks to the client when the channel supports it (Teams, DirectLine,
+    etc.).  Falls back to a single ``send_activity`` for non-streaming
+    channels or agentic requests that don't yet support streaming.
+    """
 
     # ----- Acquire Fabric token -----
     user_token: str | None = None
@@ -572,21 +578,58 @@ async def _run_agent_pipeline(
         conversation_id, len(tools),
     )
 
-    result = await ORCHESTRATOR_AGENT.run(
-        user_text,
-        session=session,
-        tools=tools,
-    )
+    # ----- Determine if the channel supports streaming -----
+    streamer = context.streaming_response  # lazy-created StreamingResponse
+    use_streaming = streamer is not None and getattr(streamer, "_is_streaming_channel", False)
+    logger.info("Streaming mode: %s", "enabled" if use_streaming else "disabled")
 
-    assistant_text = str(result).strip()
-    if not assistant_text:
-        assistant_text = (
-            "I wasn't able to generate a response. "
-            "Please try rephrasing your question."
+    if use_streaming:
+        # ── Streaming path ────────────────────────────────────────────
+        streamer.queue_informative_update("Querying Fabric data agents…")
+        streamer.set_generated_by_ai_label(True)
+        streamer.set_feedback_loop(True)
+
+        response_stream = ORCHESTRATOR_AGENT.run(
+            user_text,
+            session=session,
+            tools=tools,
+            stream=True,
         )
 
-    logger.info("Agent response length: %d chars", len(assistant_text))
-    await context.send_activity(assistant_text)
+        async for update in response_stream:
+            chunk_text = update.text
+            if chunk_text:
+                streamer.queue_text_chunk(chunk_text)
+
+        # Finalise the MAF stream (updates session history)
+        await response_stream.get_final_response()
+
+        # If nothing was streamed, send a fallback message
+        if not streamer.get_message().strip():
+            streamer.queue_text_chunk(
+                "I wasn't able to generate a response. "
+                "Please try rephrasing your question."
+            )
+
+        await streamer.end_stream()
+        logger.info("Streamed response length: %d chars", len(streamer.get_message()))
+    else:
+        # ── Non-streaming fallback ────────────────────────────────────
+        result = await ORCHESTRATOR_AGENT.run(
+            user_text,
+            session=session,
+            tools=tools,
+        )
+
+        assistant_text = str(result).strip()
+        if not assistant_text:
+            assistant_text = (
+                "I wasn't able to generate a response. "
+                "Please try rephrasing your question."
+            )
+
+        logger.info("Agent response length: %d chars", len(assistant_text))
+        await context.send_activity(assistant_text)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

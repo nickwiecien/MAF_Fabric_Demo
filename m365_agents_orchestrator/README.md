@@ -184,6 +184,21 @@ m365_agents_orchestrator/
 3. **Azure OpenAI Responses API** — The user's message (plus conversation history and system prompt) is sent to Azure OpenAI's Responses API with three MCP tool definitions. Azure OpenAI decides which tool(s) to invoke and calls the Fabric MCP endpoints server-side.
 4. **Response Delivery** — The combined response is sent back to the user through the same M365 channel.
 
+## Streaming Behavior
+
+The agent uses **streaming responses** when the M365 channel supports it. The MAF agent streams LLM tokens as fast as the model produces them, but the M365 Agents SDK throttles delivery to the client at a channel-appropriate rate:
+
+| Channel | Streaming | Chunk Interval |
+|---------|-----------|----------------|
+| **Teams** (direct chat) | Yes | **1.0 s** |
+| **DirectLine / Web Chat** | Yes | **0.5 s** |
+| **Other** (`delivery_mode=stream`) | Yes | **0.1 s** |
+| **Teams agentic** (Copilot-orchestrated) | **No** — not yet supported by the SDK | N/A |
+
+Fast-arriving LLM deltas are coalesced: the SDK accumulates text in a buffer and sends the full accumulated message as one activity per interval. The user sees progressively growing text updating at a steady cadence — no tokens are lost, just batched into larger chunks.
+
+For non-streaming channels (or agentic requests), the agent falls back to waiting for the complete response and sending it as a single message.
+
 ## Comparison with the DevUI Version
 
 | | DevUI Version (`agents/`) | M365 Channels Version (`m365_agents_orchestrator/`) |
